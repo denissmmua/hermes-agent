@@ -5,3 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+hermes-core = { path = "../hermes-core" }
+hermes-agent = { path = "../hermes-agent" }
+hermes-gateway = { path = "../hermes-gateway" }
+hermes-tools = { path = "../hermes-tools" }
+tokio.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

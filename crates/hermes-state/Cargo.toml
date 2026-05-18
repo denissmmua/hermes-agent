@@ -5,3 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+hermes-core = { path = "../hermes-core" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+chrono.workspace = true
