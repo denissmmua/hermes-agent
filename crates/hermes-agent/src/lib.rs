@@ -8,6 +8,7 @@ pub mod credential_sources;
 pub mod chat_helpers;
 pub mod display;
 pub mod account_usage;
+pub mod file_safety;
 
 pub use runtime::*;
 pub use context::*;
@@ -19,3 +20,4 @@ pub use credential_sources::*;
 pub use chat_helpers::*;
 pub use display::*;
 pub use account_usage::*;
+pub use file_safety::*;
