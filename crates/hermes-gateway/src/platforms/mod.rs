@@ -1,3 +1,11 @@
+pub mod telegram;
+pub mod discord;
+pub mod slack;
+
+pub use telegram::*;
+pub use discord::*;
+pub use slack::*;
+
 use async_trait::async_trait;
 use hermes_core::AgentResult;
 
@@ -38,4 +46,25 @@ pub trait Platform: Send + Sync {
     async fn delete_message(&self, chat_id: &str, message_id: &str) -> AgentResult<()>;
     async fn send_typing(&self, chat_id: &str) -> AgentResult<()>;
     async fn start(&self) -> AgentResult<()>;
+}
+
+/// Default no-op platform (for tests)
+pub struct NoopPlatform;
+
+#[async_trait]
+impl Platform for NoopPlatform {
+    fn name(&self) -> &str { "noop" }
+    fn capabilities(&self) -> PlatformCapabilities {
+        PlatformCapabilities {
+            can_edit_messages: false, can_delete_messages: false,
+            can_send_typing: false, supports_threads: false,
+            supports_reactions: false, supports_markdown: false,
+            supports_code_blocks: false, supports_images: false,
+        }
+    }
+    async fn send_message(&self, _: &str, _: &str) -> AgentResult<String> { Ok("ok".to_string()) }
+    async fn edit_message(&self, _: &str, _: &str, _: &str) -> AgentResult<()> { Ok(()) }
+    async fn delete_message(&self, _: &str, _: &str) -> AgentResult<()> { Ok(()) }
+    async fn send_typing(&self, _: &str) -> AgentResult<()> { Ok(()) }
+    async fn start(&self) -> AgentResult<()> { Ok(()) }
 }
