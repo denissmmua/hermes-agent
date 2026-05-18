@@ -4,11 +4,10 @@ use tracing::{error, info, warn};
 use reqwest::Client;
 
 use hermes_core::{AgentConfig, GatewayConfig, ToolRegistry};
-use hermes_agent::AgentRuntime;
 use hermes_gateway::OpenAIProvider;
+use hermes_agent::AgentRuntime;
 use hermes_tools::{ShellTool, ReadFileTool, WriteFileTool, GrepTool, GitTool, WebFetchTool};
 
-/// Telegram bot config
 #[derive(Debug, Clone)]
 pub struct TelegramConfig {
     pub bot_token: String,
@@ -18,273 +17,257 @@ pub struct TelegramConfig {
     pub api_key: String,
 }
 
-/// Telegram message types
 #[derive(serde::Deserialize, Debug)]
-#[derive(Default)]
 struct Update {
-    #[serde(default)]
     update_id: i64,
     #[serde(default)]
     message: Option<Message>,
 }
 
-#[derive(serde::Deserialize, Debug)]
-#[derive(Default)]
+#[derive(serde::Deserialize, Debug, Default)]
 struct Message {
-    #[serde(default)]
     message_id: i64,
-    #[serde(default)]
     chat: Chat,
-    #[serde(default)]
     text: Option<String>,
-    #[serde(default)]
     from: Option<User>,
+    #[serde(default)]
+    message_thread_id: Option<i64>,
 }
 
-#[derive(serde::Deserialize, Debug)]
-#[derive(Default)]
-struct Chat {
-    id: i64,
-    #[serde(default)]
-    r#type: Option<String>,
-}
+#[derive(serde::Deserialize, Debug, Default)]
+struct Chat { id: i64, r#type: Option<String> }
 
-#[derive(serde::Deserialize, Debug)]
-#[derive(Default)]
-struct User {
-    id: i64,
-    #[serde(default)]
-    username: Option<String>,
-    #[serde(default)]
-    first_name: Option<String>,
-}
+#[derive(serde::Deserialize, Debug, Default)]
+struct User { id: i64, username: Option<String>, first_name: Option<String> }
 
 #[derive(serde::Serialize)]
-struct SendMessage {
+struct SendMsg {
     chat_id: i64,
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reply_to_message_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    parse_mode: Option<String>,
+    message_thread_id: Option<i64>,
+}
+
+#[derive(serde::Serialize)]
+struct EditMsg {
+    chat_id: i64,
+    message_id: i64,
+    text: String,
 }
 
 #[derive(serde::Deserialize)]
-struct ApiResponse {
-    ok: bool,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    result: Option<serde_json::Value>,
+struct ApiResponse { ok: bool, result: Option<serde_json::Value> }
+
+struct BotState {
+    runtime: AgentRuntime,
+    bot: Arc<TelegramBotInner>,
 }
 
 pub struct TelegramBot {
+    inner: Arc<TelegramBotInner>,
+    state: Arc<Mutex<Option<BotState>>>,
+    last_update_id: Arc<Mutex<i64>>,
+}
+
+struct TelegramBotInner {
     client: Client,
     api_url: String,
     config: TelegramConfig,
-    runtime: Arc<Mutex<Option<AgentRuntime>>>,
-    last_update_id: Arc<Mutex<i64>>,
 }
 
 impl TelegramBot {
     pub fn new(config: TelegramConfig) -> Self {
         let api_url = format!("https://api.telegram.org/bot{}", config.bot_token);
         Self {
-            client: Client::new(),
-            api_url,
-            config,
-            runtime: Arc::new(Mutex::new(None)),
+            inner: Arc::new(TelegramBotInner {
+                client: Client::new(),
+                api_url,
+                config,
+            }),
+            state: Arc::new(Mutex::new(None)),
             last_update_id: Arc::new(Mutex::new(0)),
         }
     }
 
-    pub async fn init_runtime(&self) -> anyhow::Result<()> {
+    pub async fn start(&self) -> anyhow::Result<()> {
+        info!("Starting Hermes Telegram bot...");
+        self.init_state().await?;
+        loop {
+            if let Err(e) = self.poll_once().await {
+                error!("Poll: {}", e);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    async fn init_state(&self) -> anyhow::Result<()> {
         let gw_config = GatewayConfig {
             provider: "openai".to_string(),
-            model: self.config.model.clone(),
-            api_key: self.config.api_key.clone(),
-            base_url: Some(self.config.base_url.clone()),
+            model: self.inner.config.model.clone(),
+            api_key: self.inner.config.api_key.clone(),
+            base_url: Some(self.inner.config.base_url.clone()),
             ..Default::default()
         };
 
         let gateway = Arc::new(OpenAIProvider::new(gw_config));
 
         let mut tools = ToolRegistry::new();
-        tools.register(Arc::new(ShellTool));
-        tools.register(Arc::new(ReadFileTool));
-        tools.register(Arc::new(WriteFileTool));
-        tools.register(Arc::new(GrepTool));
-        tools.register(Arc::new(GitTool));
-        tools.register(Arc::new(WebFetchTool));
+        for t in [Arc::new(ShellTool) as Arc<dyn hermes_core::Tool>,
+                  Arc::new(ReadFileTool), Arc::new(WriteFileTool),
+                  Arc::new(GrepTool), Arc::new(GitTool), Arc::new(WebFetchTool)] {
+            tools.register(t);
+        }
 
-        let agent_cfg = AgentConfig {
+        let mut runtime = AgentRuntime::new(AgentConfig {
             name: "hermes".to_string(),
-            model: self.config.model.clone(),
+            model: self.inner.config.model.clone(),
             system_prompt: "\
-You are Hermes, an AI coding agent running as a Telegram bot in Rust. \
-You have tools for shell commands, file operations, git, web fetching, and text search. \
-Use native function calling when you need to execute commands. \
-Be concise, helpful, and respond in the user's language.".to_string(),
+You are Hermes, an AI agent in Rust running as a Telegram bot. \
+Tools: shell, read_file, write_file, grep, git, web_fetch. \
+Use function calling when needed. Be concise.".to_string(),
             ..Default::default()
-        };
+        }, gateway.clone());
 
-        let mut runtime = AgentRuntime::new(agent_cfg, gateway.clone());
         for name in tools.names() {
-            if let Some(t) = tools.get(&name) {
-                runtime.register_tool(t);
-            }
+            if let Some(t) = tools.get(&name) { runtime.register_tool(t); }
         }
 
-        *self.runtime.lock().await = Some(runtime);
-        info!("Hermes Telegram bot runtime initialized");
+        *self.state.lock().await = Some(BotState {
+            runtime,
+            bot: self.inner.clone(),
+        });
+
+        info!("Runtime ready");
         Ok(())
-    }
-
-    pub async fn start(&self) -> anyhow::Result<()> {
-        info!("🟢 Hermes Telegram bot starting (long polling)...");
-        self.init_runtime().await?;
-
-        loop {
-            if let Err(e) = self.poll_once().await {
-                error!("Poll error: {}", e);
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        }
     }
 
     async fn poll_once(&self) -> anyhow::Result<()> {
-        let last_id = *self.last_update_id.lock().await;
-        let offset = last_id + 1;
-
-        let url = format!("{}/getUpdates", self.api_url);
-        let resp = self.client
-            .post(&url)
-            .json(&serde_json::json!({
-                "offset": offset,
-                "timeout": 30,
-                "allowed_updates": ["message"]
-            }))
-            .send()
-            .await?;
-
-        let api_resp: ApiResponse = resp.json().await?;
-        if !api_resp.ok {
-            warn!("Telegram API error: {:?}", api_resp.description);
-            return Ok(());
-        }
+        let offset = *self.last_update_id.lock().await + 1;
+        let resp = self.inner.client
+            .post(format!("{}/getUpdates", self.inner.api_url))
+            .json(&serde_json::json!({"offset": offset, "timeout": 30, "allowed_updates": ["message"]}))
+            .send().await?;
 
         let updates: Vec<Update> = serde_json::from_value(
-            api_resp.result.unwrap_or_default()
+            match resp.json::<ApiResponse>().await {
+                Ok(a) => a.result.unwrap_or_default(),
+                Err(_) => return Ok(()),
+            }
         ).unwrap_or_default();
 
-        for update in updates {
-            self.handle_update(update).await?;
+        for u in updates {
+            let uid = u.update_id;
+            *self.last_update_id.lock().await = uid;
+            if let Err(e) = self.handle(u).await {
+                error!("Update {}: {}", uid, e);
+            }
         }
-
         Ok(())
     }
 
-    async fn handle_update(&self, update: Update) -> anyhow::Result<()> {
-        // Track last update id
-        {
-            let mut last = self.last_update_id.lock().await;
-            if update.update_id > *last {
-                *last = update.update_id;
-            }
-        }
-
-        let msg = match update.message {
-            Some(m) => m,
-            None => return Ok(()),
-        };
-
+    async fn handle(&self, update: Update) -> anyhow::Result<()> {
+        let msg = match update.message { Some(m) => m, None => return Ok(()) };
+        let text = match &msg.text { Some(t) if !t.is_empty() => t.clone(), _ => return Ok(()) };
         let chat_id = msg.chat.id;
-        let text = match &msg.text {
-            Some(t) if !t.is_empty() => t.clone(),
-            _ => return Ok(()),
-        };
+        let thread_id = msg.message_thread_id;
+        let reply_id = msg.message_id;
 
-        // Check if chat is allowed
-        if !self.config.allowed_chat_ids.is_empty() && !self.config.allowed_chat_ids.contains(&chat_id) {
+        // Skip own messages
+        if let Some(ref from) = msg.from {
+            if from.id == 8894352489 { return Ok(()); }
+        }
+
+        // Filter
+        if !self.inner.config.allowed_chat_ids.is_empty() &&
+           !self.inner.config.allowed_chat_ids.contains(&chat_id) {
             return Ok(());
         }
 
-        // Skip commands that start with /
+        // Commands
         if text.starts_with('/') {
-            match text.as_str() {
-                "/start" | "/help" => {
-                    self.send_text(chat_id, "🔷 Hermes Agent Rust — Telegram bot\n\nSend me any message and I'll respond as the AI agent.\n\nAvailable tools: shell, file, git, grep, web_fetch", msg.message_id).await?;
-                }
-                "/status" => {
-                    self.send_text(chat_id, "✅ Hermes Telegram bot is running", msg.message_id).await?;
-                }
-                _ => {}
-            }
-            return Ok(());
+            return self.handle_command(chat_id, thread_id, &text, reply_id).await;
         }
 
-        info!("⚡ Message from {}: {}", chat_id, &text[..text.len().min(50)]);
+        info!("⚡ {}: {}", chat_id, &text[..text.len().min(60)]);
+        self.send_action(chat_id, "typing").await.ok();
 
-        // Think indicator
-        self.send_chat_action(chat_id, "typing").await.ok();
+        // Send "thinking" message first, then edit it
+        let status_msg = self.send_msg(chat_id, thread_id, Some(reply_id), "🤔 Думаю...").await?;
 
-        // Process through agent
         let result = {
-            let mut rt_guard = self.runtime.lock().await;
-            match &mut *rt_guard {
-                Some(runtime) => runtime.run_turn(&text).await,
-                None => Err(hermes_core::AgentError::Unknown("Runtime not initialized".into())),
+            let mut guard = self.state.lock().await;
+            match &mut *guard {
+                Some(s) => s.runtime.run_turn(&text).await,
+                None => return Ok(()),
             }
         };
 
         match result {
             Ok(response) => {
                 if !response.is_empty() {
-                    self.send_text(chat_id, &response, msg.message_id).await?;
+                    // Edit the status message with the real response
+                    self.edit_msg(chat_id, status_msg, &response).await?;
                 }
                 // Show tool results
-                let rt_guard = self.runtime.lock().await;
-                if let Some(runtime) = &*rt_guard {
-                    let tool_msgs: Vec<_> = runtime.state().conversation.messages.iter()
-                        .filter(|m| m.content.starts_with("Tool ") || m.content.starts_with("Result:"))
-                        .collect();
-                    for tm in tool_msgs {
-                        let short = if tm.content.len() > 1000 {
-                            format!("{}...\n[truncated {} chars]", &tm.content[..1000], tm.content.len() - 1000)
-                        } else {
-                            tm.content.clone()
-                        };
-                        self.send_text(chat_id, &short, msg.message_id).await.ok();
+                let guard = self.state.lock().await;
+                if let Some(s) = &*guard {
+                    for m in s.runtime.state().conversation.messages.iter().rev().take(3) {
+                        if (m.content.starts_with("Result:") || m.content.starts_with("Tool ")) &&
+                            !response.contains(&m.content) {
+                            let short = if m.content.len() > 400 {
+                                format!("{}...", &m.content[..400])
+                            } else { m.content.clone() };
+                            self.send_msg(chat_id, thread_id, Some(reply_id), &short).await.ok();
+                        }
                     }
                 }
             }
             Err(e) => {
-                self.send_text(chat_id, &format!("⚠ Error: {}", e), msg.message_id).await?;
+                self.edit_msg(chat_id, status_msg, &format!("⚠ Error: {}", e)).await?;
             }
         }
 
         Ok(())
     }
 
-    async fn send_text(&self, chat_id: i64, text: &str, reply_id: i64) -> anyhow::Result<()> {
-        let url = format!("{}/sendMessage", self.api_url);
-        let payload = SendMessage {
-            chat_id,
-            text: text.to_string(),
-            reply_to_message_id: Some(reply_id),
-            parse_mode: None,
+    async fn handle_command(&self, chat_id: i64, thread_id: Option<i64>, cmd: &str, reply_id: i64) -> anyhow::Result<()> {
+        let response = match cmd {
+            "/start" => "🔷 **Hermes Agent Rust** — Telegram bot\n\nНапиши что-нибудь — я отвечу.".to_string(),
+            "/status" => "✅ Бот работает\nМодель: deepseek-chat\nИнструменты: shell, файлы, git, grep, web".to_string(),
+            _ => format!("Неизвестная команда: {}", cmd),
         };
-        self.client.post(&url).json(&payload).send().await?;
+        self.send_msg(chat_id, thread_id, Some(reply_id), &response).await?;
         Ok(())
     }
 
-    async fn send_chat_action(&self, chat_id: i64, action: &str) -> anyhow::Result<()> {
-        let url = format!("{}/sendChatAction", self.api_url);
-        self.client
-            .post(&url)
+    async fn send_msg(&self, chat_id: i64, thread_id: Option<i64>, reply_to: Option<i64>, text: &str) -> anyhow::Result<i64> {
+        let payload = SendMsg {
+            chat_id, text: text.to_string(),
+            reply_to_message_id: reply_to,
+            message_thread_id: thread_id,
+        };
+        let resp = self.inner.client
+            .post(format!("{}/sendMessage", self.inner.api_url))
+            .json(&payload).send().await?;
+        let data: serde_json::Value = resp.json().await?;
+        Ok(data["result"]["message_id"].as_i64().unwrap_or(0))
+    }
+
+    async fn edit_msg(&self, chat_id: i64, msg_id: i64, text: &str) -> anyhow::Result<()> {
+        self.inner.client
+            .post(format!("{}/editMessageText", self.inner.api_url))
+            .json(&EditMsg { chat_id, message_id: msg_id, text: text.to_string() })
+            .send().await?;
+        Ok(())
+    }
+
+    async fn send_action(&self, chat_id: i64, action: &str) -> anyhow::Result<()> {
+        self.inner.client
+            .post(format!("{}/sendChatAction", self.inner.api_url))
             .json(&serde_json::json!({"chat_id": chat_id, "action": action}))
-            .send()
-            .await?;
+            .send().await?;
         Ok(())
     }
 }
