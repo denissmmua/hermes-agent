@@ -1,0 +1,5 @@
+target/
+python-reference/
+.env
+*.swp
+*.swo
