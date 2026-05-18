@@ -6,6 +6,7 @@ pub mod ai_agent;
 pub mod conversation_loop;
 pub mod credential_sources;
 pub mod chat_helpers;
+pub mod display;
 
 pub use runtime::*;
 pub use context::*;
@@ -15,3 +16,4 @@ pub use ai_agent::*;
 pub use conversation_loop::*;
 pub use credential_sources::*;
 pub use chat_helpers::*;
+pub use display::*;
