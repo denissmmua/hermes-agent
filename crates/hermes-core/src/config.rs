@@ -114,6 +114,7 @@ pub struct HermesConfig {
     pub cron: serde_json::Value,
     pub gateway: Option<GatewayConfig>,
     pub agent_name: Option<String>,
+    pub state_dir: Option<String>,
 }
 
 impl Default for HermesConfig {
@@ -131,6 +132,7 @@ impl Default for HermesConfig {
             cron: serde_json::json!({"enabled": false}),
             gateway: None,
             agent_name: Some("hermes".to_string()),
+            state_dir: None,
         }
     }
 }
