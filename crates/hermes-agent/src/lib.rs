@@ -11,6 +11,7 @@ pub mod account_usage;
 pub mod file_safety;
 pub mod error_classifier;
 pub mod auxiliary_client;
+pub mod conversation_compression;
 
 pub use runtime::*;
 pub use context::*;
@@ -25,3 +26,4 @@ pub use account_usage::*;
 pub use file_safety::*;
 pub use error_classifier::*;
 pub use auxiliary_client::*;
+pub use conversation_compression::*;

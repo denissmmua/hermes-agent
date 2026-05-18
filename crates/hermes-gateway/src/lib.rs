@@ -6,6 +6,9 @@ pub mod registry;
 pub mod hooks;
 pub mod platforms;
 pub mod mirror;
+pub mod delivery;
+pub mod pairing;
+pub mod channel_directory;
 
 pub use provider::*;
 pub use openai::*;
@@ -15,3 +18,6 @@ pub use registry::*;
 pub use hooks::*;
 pub use platforms::*;
 pub use mirror::*;
+pub use delivery::*;
+pub use pairing::*;
+pub use channel_directory::*;
