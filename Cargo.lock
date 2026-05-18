@@ -534,8 +534,11 @@ dependencies = [
  "regex-lite",
  "serde",
  "serde_json",
+ "serde_yaml",
+ "shellexpand",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
