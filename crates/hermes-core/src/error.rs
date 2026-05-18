@@ -34,3 +34,20 @@ pub enum AgentError {
 }
 
 pub type AgentResult<T> = Result<T, AgentError>;
+
+#[cfg(test)]
+mod tests {
+    use crate::AgentError;
+
+    #[test]
+    fn test_error_display() {
+        let e = AgentError::Provider("API down".into());
+        assert!(e.to_string().contains("API down"));
+    }
+
+    #[test]
+    fn test_rate_limited() {
+        let e = AgentError::RateLimited(30);
+        assert!(e.to_string().contains("30"));
+    }
+}

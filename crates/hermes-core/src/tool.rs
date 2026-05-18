@@ -71,3 +71,21 @@ impl ToolRegistry {
         self.tools.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::ToolRegistry;
+
+    #[test]
+    fn test_empty_registry() {
+        let r = ToolRegistry::new();
+        assert!(r.is_empty());
+        assert_eq!(r.len(), 0);
+    }
+
+    #[test]
+    fn test_all_names_empty() {
+        let r = ToolRegistry::new();
+        assert!(r.names().is_empty());
+    }
+}

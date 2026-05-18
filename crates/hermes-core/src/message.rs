@@ -126,3 +126,43 @@ impl Default for Conversation {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{Message, Conversation, Role, ToolCall};
+    use serde_json::json;
+
+    #[test]
+    fn test_messages() {
+        let m = Message::system("sys");
+        assert!(matches!(m.role, Role::System));
+        let m = Message::user("usr");
+        assert!(matches!(m.role, Role::User));
+        let m = Message::assistant("ast");
+        assert!(matches!(m.role, Role::Assistant));
+    }
+
+    #[test]
+    fn test_conversation_push() {
+        let mut c = Conversation::new();
+        c.push(Message::system("s"));
+        c.push(Message::user("u"));
+        assert_eq!(c.messages.len(), 2);
+    }
+
+    #[test]
+    fn test_tool_call() {
+        let m = Message::assistant("t").with_tool_calls(vec![
+            ToolCall { id: "1".into(), name: "x".into(), arguments: json!({}) }
+        ]);
+        assert!(m.tool_calls.is_some());
+    }
+
+    #[test]
+    fn test_serde_roundtrip() {
+        let m = Message::user("hello");
+        let j = serde_json::to_string(&m).unwrap();
+        let d: Message = serde_json::from_str(&j).unwrap();
+        assert_eq!(m.content, d.content);
+    }
+}
