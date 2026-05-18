@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Hermes Agent Rust</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="logo">Hermes</div>
+    <div class="status" id="status">Loading...</div>
+    <nav>
+      <a href="#" onclick="showTab('chat')">Chat</a>
+      <a href="#" onclick="showTab('tools')">Tools</a>
+      <a href="#" onclick="showTab('config')">Config</a>
+    </nav>
+  </aside>
+  <main class="main">
+    <div id="tab-chat" class="tab active">
+      <div class="messages" id="messages"></div>
+      <div class="input-bar">
+        <input type="text" id="prompt" placeholder="Ask something..." onkeydown="if(event.key==='Enter') send()">
+        <button onclick="send()">Send</button>
+      </div>
+    </div>
+    <div id="tab-tools" class="tab"><h2>Tools</h2><div class="tool-list" id="tool-list"></div></div>
+    <div id="tab-config" class="tab"><h2>Config</h2><div class="config-info" id="config-info"></div></div>
+  </main>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

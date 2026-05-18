@@ -654,6 +654,7 @@ dependencies = [
  "hermes-agent",
  "hermes-core",
  "hermes-gateway",
+ "hermes-tools",
  "serde",
  "serde_json",
  "tokio",

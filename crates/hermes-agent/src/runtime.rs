@@ -14,25 +14,16 @@ impl AgentRuntime {
     pub fn new(config: AgentConfig, gateway: Arc<dyn LLMProvider>) -> Self {
         let tools = Default::default();
         let state = AgentState::new(config, tools);
-        Self {
-            state,
-            gateway,
-            retry_config: RetryConfig::default(),
-        }
+        Self { state, gateway, retry_config: RetryConfig::default() }
     }
 
     pub fn state(&self) -> &AgentState { &self.state }
     pub fn state_mut(&mut self) -> &mut AgentState { &mut self.state }
-
-    pub fn with_retry_config(mut self, config: RetryConfig) -> Self {
-        self.retry_config = config;
-        self
-    }
-
     pub fn register_tool(&mut self, tool: Arc<dyn hermes_core::Tool>) {
         self.state.tools.register(tool);
     }
 
+    /// One user turn: may involve multiple LLM calls if tool calls are made
     pub async fn run_turn(&mut self, user_input: &str) -> AgentResult<String> {
         self.state.conversation.push(Message::user(user_input));
         self.state.turn += 1;
@@ -41,36 +32,56 @@ impl AgentRuntime {
             return Err(hermes_core::AgentError::Unknown("Max turns exceeded".into()));
         }
 
-        // Build request with tools
-        let llm_messages = self.to_llm_messages();
-        let tools = self.state.tools.all_definitions();
-        let model = self.state.config.model.clone();
-        let temperature = self.state.config.temperature;
+        // Observe-Think-Act loop
+        let mut final_response = String::new();
+        let mut tool_calls_made = 0;
 
-        let response = {
-            let gw = &self.gateway;
-            let msgs = llm_messages.clone();
-            let tg = tools.clone();
-            let mdl = model.clone();
-            let temp = temperature;
-            with_retry(&self.retry_config, || async {
-                let request = LLMRequest {
-                    model: mdl.clone(),
-                    messages: msgs.clone(),
-                    max_tokens: Some(4096),
-                    temperature: Some(temp),
-                    stop: None,
-                    stream: false,
-                    tools: tg.clone(),
-                };
-                gw.chat(request).await
-            })
-            .await?
-        };
+        loop {
+            if tool_calls_made > 10 {
+                final_response.push_str("\n[Max tool calls reached]");
+                break;
+            }
 
-        // Handle tool calls from native function calling
-        if !response.tool_calls.is_empty() {
+            let llm_messages = self.to_llm_messages();
+            let tools = self.state.tools.all_definitions();
+            let model = self.state.config.model.clone();
+            let temperature = self.state.config.temperature;
+
+            // 1. THINK: Ask LLM
+            let response = {
+                let gw = &self.gateway;
+                let msgs = llm_messages.clone();
+                let tg = tools.clone();
+                let mdl = model.clone();
+                let temp = temperature;
+                with_retry(&self.retry_config, || async {
+                    let request = LLMRequest {
+                        model: mdl.clone(),
+                        messages: msgs.clone(),
+                        max_tokens: Some(4096),
+                        temperature: Some(temp),
+                        stop: None,
+                        stream: false,
+                        tools: tg.clone(),
+                    };
+                    gw.chat(request).await
+                })
+                .await?
+            };
+
+            // Check if there are tool calls
+            if response.tool_calls.is_empty() {
+                // 3. ACT: No tool calls — final response
+                if !response.content.is_empty() {
+                    self.state.conversation.push(Message::assistant(&response.content));
+                    final_response = response.content;
+                }
+                break;
+            }
+
+            // 2. ACT: Execute tool calls
             for (_call_id, tool_name, args) in &response.tool_calls {
+                tool_calls_made += 1;
                 let result = match self.state.tools.get(tool_name) {
                     Some(tool) => {
                         let input = ToolInput {
@@ -79,23 +90,37 @@ impl AgentRuntime {
                         };
                         match tool.execute(input).await {
                             Ok(output) => {
-                                format!("Tool {} result: {}", tool_name, output.output)
+                                let result = format!("Result: {}", output.output);
+                                self.state.conversation.push(Message::assistant(&result));
+                                result
                             }
-                            Err(e) => format!("Tool {} error: {}", tool_name, e),
+                            Err(e) => {
+                                let err = format!("Error: {}", e);
+                                self.state.conversation.push(Message::assistant(&err));
+                                err
+                            }
                         }
                     }
-                    None => format!("Tool '{}' not found", tool_name),
+                    None => {
+                        let err = format!("Tool '{}' not found", tool_name);
+                        self.state.conversation.push(Message::assistant(&err));
+                        err
+                    }
                 };
-                self.state.conversation.push(
-                    Message::assistant(result)
-                );
+
+                // Feed result back to LLM for next iteration
+                let tool_result_msg = LLMMessage {
+                    role: "tool".to_string(),
+                    content: result.clone(),
+                };
+                // We'll include it in the next loop iteration
+                final_response = result;
             }
-            // Return first content or tool call info
-            return Ok(response.content);
+
+            // Loop continues: THINK again with tool results in context
         }
 
-        self.state.conversation.push(Message::assistant(&response.content));
-        Ok(response.content)
+        Ok(final_response)
     }
 
     fn to_llm_messages(&self) -> Vec<LLMMessage> {

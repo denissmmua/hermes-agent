@@ -14,3 +14,4 @@ serde_json.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 tracing-subscriber.workspace = true
+hermes-tools = { path = "../hermes-tools" }
