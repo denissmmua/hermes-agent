@@ -3,7 +3,7 @@ use std::path::Path;
 /// Sensitive paths that should never be written by the agent
 pub fn build_denied_paths(home_dir: &str) -> Vec<String> {
     let hermes_home = format!("{}/.hermes", home_dir);
-    let mut paths = vec![
+    let paths = vec![
         format!("{}/.ssh/authorized_keys", home_dir),
         format!("{}/.ssh/id_rsa", home_dir),
         format!("{}/.ssh/id_ed25519", home_dir),
@@ -24,13 +24,17 @@ pub fn build_denied_paths(home_dir: &str) -> Vec<String> {
 
     // Resolve to real paths
     paths.iter().map(|p| {
-        std::fs::canonicalize(Path::new(p)).unwrap_or_else(|_| p.clone())
+        std::fs::canonicalize(Path::new(p))
+            .map(|pb| pb.to_string_lossy().to_string())
+            .unwrap_or_else(|_| p.clone())
     }).collect()
 }
 
 /// Check if writing to this path is safe
 pub fn is_safe_write_path(path: &str, denied: &[String]) -> bool {
-    let real = std::fs::canonicalize(Path::new(path)).unwrap_or_else(|_| path.to_string());
+    let real = std::fs::canonicalize(Path::new(path))
+        .map(|pb| pb.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string());
     !denied.iter().any(|d| real == *d || real.starts_with(d))
 }
 
@@ -89,8 +93,7 @@ pub fn validate_write(path: &str) -> Result<(), String> {
     match WriteDanger::assess(path, &denied) {
         WriteDanger::Deny => Err(format!("Write to '{}' is denied (sensitive path)", path)),
         WriteDanger::Warn => {
-            // Allow with warning
-            eprintln!("⚠ Warning: writing to '{}'", path);
+            eprintln!("Warning: writing to '{}'", path);
             Ok(())
         }
         WriteDanger::Safe => Ok(()),
