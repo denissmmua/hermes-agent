@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
+use tokio::fs;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillMeta {
@@ -20,7 +20,7 @@ pub struct SkillMeta {
 #[async_trait]
 pub trait Skill: Send + Sync {
     fn meta(&self) -> &SkillMeta;
-    fn init_instructions(&self) -> String;
+    fn init_instructions(&self) -> &str;
 }
 
 pub struct SkillRegistry {
@@ -28,9 +28,7 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
-    pub fn new() -> Self {
-        Self { skills: HashMap::new() }
-    }
+    pub fn new() -> Self { Self { skills: HashMap::new() } }
 
     pub fn register(&mut self, skill: Box<dyn Skill>) {
         let name = skill.meta().name.clone();
@@ -45,24 +43,21 @@ impl SkillRegistry {
         self.skills.keys().cloned().collect()
     }
 
+    pub fn is_empty(&self) -> bool { self.skills.is_empty() }
+    pub fn len(&self) -> usize { self.skills.len() }
+
     pub fn collect_init_instructions(&self) -> String {
         self.skills.values()
             .map(|s| s.init_instructions())
+            .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
-            .join("\n\n")
+            .join("\n\n---\n\n")
     }
-
-    pub fn is_empty(&self) -> bool { self.skills.is_empty() }
-
-    pub fn len(&self) -> usize { self.skills.len() }
 }
 
-/// Load skills from a directory (each subdir = one skill with SKILL.md + tools/)
-pub async fn load_skills_from_dir(dir: impl AsRef<Path>) -> Vec<Box<dyn Skill>> {
+pub async fn load_skills_from_dir(dir: &Path) -> Vec<Box<dyn Skill>> {
     let mut skills: Vec<Box<dyn Skill>> = Vec::new();
-    let dir_path = dir.as_ref().to_path_buf();
-
-    let mut entries = match tokio::fs::read_dir(&dir_path).await {
+    let mut entries = match fs::read_dir(dir).await {
         Ok(d) => d,
         Err(_) => return skills,
     };
@@ -74,49 +69,28 @@ pub async fn load_skills_from_dir(dir: impl AsRef<Path>) -> Vec<Box<dyn Skill>> 
         let skill_file = path.join("SKILL.md");
         if !skill_file.exists() { continue; }
 
-        if let Ok(content) = tokio::fs::read_to_string(&skill_file).await {
-            let name = path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string();
+        let name = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
 
-            let meta = SkillMeta {
-                name,
-                description: content.lines().next().unwrap_or("").trim().to_string(),
-                version: "1.0.0".to_string(),
-                author: None,
-                dependencies: Vec::new(),
-                tools: Vec::new(),
-            };
+        let content = fs::read_to_string(&skill_file).await.unwrap_or_default();
+        let description = content.lines().next().unwrap_or("").trim().to_string();
 
-            // Look for tool files in the skill directory
-            let mut tool_files = Vec::new();
-            if let Ok(mut tool_dir) = tokio::fs::read_dir(&path).await {
-                while let Ok(Some(tool_entry)) = tool_dir.next_entry().await {
-                    let tool_path = tool_entry.path();
-                    if tool_path.extension().map_or(false, |e| e == "rs" || e == "py" || e == "sh") {
-                        tool_files.push(tool_path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("")
-                            .to_string());
-                    }
-                }
-            }
+        let meta = SkillMeta {
+            name, description, version: "1.0.0".to_string(),
+            author: None, dependencies: Vec::new(), tools: Vec::new(),
+        };
 
-            skills.push(Box::new(FileSystemSkill { meta, content }));
-        }
+        skills.push(Box::new(FsSkill { meta, content }));
     }
-
     skills
 }
 
-struct FileSystemSkill {
-    meta: SkillMeta,
-    content: String,
-}
+struct FsSkill { meta: SkillMeta, content: String }
 
 #[async_trait]
-impl Skill for FileSystemSkill {
+impl Skill for FsSkill {
     fn meta(&self) -> &SkillMeta { &self.meta }
-    fn init_instructions(&self) -> String { self.content.clone() }
+    fn init_instructions(&self) -> &str { &self.content }
 }

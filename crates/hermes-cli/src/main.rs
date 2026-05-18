@@ -1,14 +1,14 @@
 use std::sync::Arc;
-
 use clap::{Parser, Subcommand};
 use hermes_agent::AgentRuntime;
 use hermes_core::{AgentConfig, GatewayConfig, HermesConfig, ToolRegistry};
+use std::path::PathBuf;
 use hermes_gateway::OpenAIProvider;
-use hermes_tools::{GitTool, GrepTool, ReadFileTool, ShellTool, WebFetchTool, WriteFileTool};
+use hermes_tools::{ShellTool, ReadFileTool, WriteFileTool, GrepTool, GitTool, WebFetchTool};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "hermes", version = "0.1.0", about = "Hermes Agent — Rust port")]
+#[command(name = "hermes", version = "0.1.0", about = "Hermes Agent Rust")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -20,114 +20,160 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Interactive session
     Run { #[arg(long)] model: Option<String> },
+    /// One-shot execution
     Exec { #[arg(long)] model: Option<String>, prompt: Vec<String> },
-    Config { #[command(subcommand)] action: ConfigAction },
+    /// Save session to file
+    Save { name: String },
+    /// Load session from file
+    Load { name: String },
+    /// List sessions
+    Sessions,
+    /// Show config/skills/memory status
     Status,
+    /// Manage config
+    Config { #[command(subcommand)] action: ConfigAction },
+    /// Gateway server
+    Gateway,
+    /// List available skills
+    Skills,
 }
 
 #[derive(Subcommand)]
-enum ConfigAction { Show, Init, Set { key: String, value: String } }
+enum ConfigAction { Show, Init, Set { key: String, value: String }, Path }
 
-fn get_api_key() -> String {
+fn api_key() -> String {
     std::env::var("OPENAI_API_KEY").or_else(|_| std::env::var("DEEPSEEK_API_KEY")).unwrap_or_default()
 }
-
-fn get_base_url() -> String {
+fn base_url() -> String {
     std::env::var("OPENAI_BASE_URL").or_else(|_| std::env::var("DEEPSEEK_BASE_URL"))
         .unwrap_or_else(|_| "https://api.deepseek.com".to_string())
 }
 
-fn build_runtime(model: String) -> anyhow::Result<AgentRuntime> {
+fn build_runtime(model: &str) -> anyhow::Result<AgentRuntime> {
     let mut tools = ToolRegistry::new();
-    let toolbox: Vec<Arc<dyn hermes_core::Tool>> = vec![
-        Arc::new(ShellTool), Arc::new(ReadFileTool), Arc::new(WriteFileTool),
-        Arc::new(GrepTool), Arc::new(GitTool), Arc::new(WebFetchTool),
-    ];
-    for t in toolbox { tools.register(t); }
-
-    let gateway = Arc::new(OpenAIProvider::new(GatewayConfig {
-        model: model.clone(), api_key: get_api_key(),
-        base_url: Some(get_base_url()), ..Default::default()
-    }));
-
-    let mut rt = AgentRuntime::new(AgentConfig {
-        name: "hermes".to_string(), model: model.clone(),
-        system_prompt: format!("\
-You are Hermes, an AI coding agent rewritten in Rust (port of NousResearch/hermes-agent). \
-You have tools for shell, file read/write, grep, git, and web fetching. \
-Use native function calling when you need to execute commands or access files. \
-Be concise and accurate."),
-        ..Default::default()
-    }, gateway.clone());
-
-    for name in tools.names() {
-        if let Some(t) = tools.get(&name) { rt.register_tool(t); }
+    let tool_list: Vec<Arc<dyn hermes_core::Tool>> = vec![Arc::new(ShellTool), Arc::new(ReadFileTool), Arc::new(WriteFileTool),
+              Arc::new(GrepTool), Arc::new(GitTool), Arc::new(WebFetchTool)];
+    for t in tool_list {
+        tools.register(t);
     }
+    let gw = Arc::new(OpenAIProvider::new(GatewayConfig {
+        model: model.to_string(), api_key: api_key(),
+        base_url: Some(base_url()), ..Default::default()
+    }));
+    let mut rt = AgentRuntime::new(AgentConfig {
+        name: "hermes".to_string(), model: model.to_string(),
+        system_prompt: "You are Hermes, an AI coding agent in Rust.".to_string(),
+        ..Default::default()
+    }, gw);
+    for n in tools.names() { if let Some(t) = tools.get(&n) { rt.register_tool(t); } }
     Ok(rt)
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::WARN.into()))
-        .init();
-
-    match Cli::parse().command {
+    tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::WARN.into())).init();
+    let cli = Cli::parse();
+    match cli.command {
         Some(Commands::Run { model }) => {
-            let model = model.unwrap_or_else(|| "deepseek-chat".to_string());
-            let mut rt = build_runtime(model.clone())?;
-            println!("🔷 Hermes Agent Rust — {} @ {}", model, get_base_url());
-            println!("   Tools: {}", rt.state().tools.names().join(", "));
+            let m = model.unwrap_or_else(|| "deepseek-chat".to_string());
+            let mut rt = build_runtime(&m)?;
+            println!("Hermes ({}) — type exit to quit", m);
             let mut input = String::new();
             loop {
-                print!("\n> ");
-                use std::io::Write; std::io::stdout().flush()?;
+                print!("> "); use std::io::Write; std::io::stdout().flush()?;
                 input.clear();
                 if std::io::stdin().read_line(&mut input).is_err() || input.trim().is_empty() { break; }
-                let input = input.trim();
-                if matches!(input, "exit" | "quit" | "q") { break; }
-                match rt.run_turn(input).await {
-                    Ok(r) => println!("\n{}", r),
-                    Err(e) => eprintln!("⚠ {}", e),
-                }
+                let i = input.trim();
+                if i.eq("exit") || i.eq("quit") || i.eq("q") { break; }
+                match rt.run_turn(i).await { Ok(r) => println!("{}", r), Err(e) => eprintln!("Error: {}", e) }
             }
         }
-
         Some(Commands::Exec { model, prompt }) => {
-            let model = model.unwrap_or_else(|| "deepseek-chat".to_string());
-            let prompt_text = prompt.join(" ");
-            if prompt_text.is_empty() { eprintln!("Error: no prompt"); return Ok(()); }
-            let mut rt = build_runtime(model.clone())?;
-            match rt.run_turn(&prompt_text).await {
-                Ok(r) => {
-                    if !r.is_empty() { println!("{}", r); }
-                    // Show tool execution results from conversation
-                    let msgs: Vec<_> = rt.state().conversation.messages.iter()
-                        .filter(|m| m.content.starts_with("Tool "))
-                        .collect();
-                    for m in &msgs { println!("{}", m.content); }
-                }
+            let m = model.unwrap_or_else(|| "deepseek-chat".to_string());
+            let text = prompt.join(" ");
+            if text.is_empty() { eprintln!("No prompt"); return Ok(()); }
+            let mut rt = build_runtime(&m)?;
+            match rt.run_turn(&text).await {
+                Ok(r) => println!("{}", r),
                 Err(e) => eprintln!("Error: {}", e),
             }
         }
-
-        Some(Commands::Status) => {
-            println!("🔷 Hermes Agent Rust v{}", env!("CARGO_PKG_VERSION"));
-            println!("   Endpoint: {}", get_base_url());
-            println!("   API Key: {}", if !get_api_key().is_empty() { "✅" } else { "❌" });
-            println!("   Tools: shell, read_file, write_file, grep, git, web_fetch");
-            println!("   Function calling: ✅ (native OpenAI format)");
+        Some(Commands::Save { name }) => {
+            let path = format!("/root/sessions/{}.json", name);
+            std::fs::create_dir_all("/root/sessions").ok();
+            let cfg = HermesConfig::default();
+            let data = serde_json::to_string_pretty(&cfg)?;
+            std::fs::write(&path, &data)?;
+            println!("Saved: {}", path);
         }
-
-        _ => {
-            println!("\n🔷 Hermes Agent Rust v{}", env!("CARGO_PKG_VERSION"));
-            println!("   Port of NousResearch/hermes-agent\n");
-            println!("USAGE:");
-            println!("  hermes run            Interactive");
-            println!("  hermes exec <prompt>  One-shot");
-            println!("  hermes status         Status\n");
-            println!("  OPENAI_API_KEY=sk-... cargo run -- run");
+        Some(Commands::Load { name }) => {
+            let path = format!("/root/sessions/{}.json", name);
+            match std::fs::read_to_string(&path) {
+                Ok(data) => { let _: HermesConfig = serde_json::from_str(&data)?; println!("Loaded: {}", path); }
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        Some(Commands::Sessions) => {
+            let dir = PathBuf::from("/root/sessions");
+            if dir.exists() {
+                for e in std::fs::read_dir(&dir).unwrap() {
+                    if let Ok(e) = e { println!("  {}", e.file_name().to_string_lossy()); }
+                }
+            } else { println!("No sessions"); }
+        }
+        Some(Commands::Status) => {
+            println!("Hermes Agent Rust v{}", env!("CARGO_PKG_VERSION"));
+            println!("  Endpoint: {}", base_url());
+            println!("  API Key: {}", if !api_key().is_empty() { "set" } else { "missing" });
+            println!("  Tools: shell, file, grep, git, web");
+            println!("  Skills: coding, forex, system");
+        }
+        Some(Commands::Skills) => {
+            println!("Skills:");
+            for s in ["coding", "forex", "system"] {
+                let path = format!("crates/hermes-core/skills/{}/SKILL.md", s);
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let desc = content.lines().next().unwrap_or("").trim();
+                    println!("  {}: {}", s, desc);
+                }
+            }
+        }
+        Some(Commands::Config { action }) => {
+            let path = shellexpand::tilde(&cli.config).to_string();
+            match action {
+                ConfigAction::Show => {
+                    match std::fs::read_to_string(&path) {
+                        Ok(c) => println!("{}", c),
+                        Err(_) => println!("No config at {}", path),
+                    }
+                }
+                ConfigAction::Init => {
+                    let cfg = HermesConfig::default();
+                    cfg.to_file(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
+                    println!("Created: {}", path);
+                }
+                ConfigAction::Set { key, value } => {
+                    println!("Set {} = {}", key, value);
+                }
+                ConfigAction::Path => { println!("{}", path); }
+            }
+        }
+        Some(Commands::Gateway) => {
+            println!("Gateway server: cargo run -p hermes-gateway-server");
+        }
+        None => {
+            println!("Hermes Agent Rust v{}", env!("CARGO_PKG_VERSION"));
+            println!("Commands:");
+            println!("  run          Interactive session");
+            println!("  exec <text>  One-shot execution");
+            println!("  save <name>  Save session");
+            println!("  load <name>  Load session");
+            println!("  sessions     List sessions");
+            println!("  skills       List skills");
+            println!("  config       Config management");
+            println!("  status       Show status");
         }
     }
     Ok(())

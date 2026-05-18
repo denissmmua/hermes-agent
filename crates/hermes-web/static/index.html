@@ -6,23 +6,29 @@
 <div class="app">
   <aside class="sidebar">
     <div class="logo">Hermes</div>
-    <div class="status" id="status">Loading...</div>
+    <div class="status" id="status">...</div>
     <nav>
-      <a href="#" onclick="showTab('chat')">Chat</a>
-      <a href="#" onclick="showTab('tools')">Tools</a>
-      <a href="#" onclick="showTab('config')">Config</a>
+      <a href="#" class="active" onclick="switchTab('chat')">Chat</a>
+      <a href="#" onclick="switchTab('tools')">Tools</a>
+      <a href="#" onclick="switchTab('config')">Config</a>
+      <a href="#" onclick="switchTab('sessions')">Sessions</a>
     </nav>
   </aside>
   <main class="main">
     <div id="tab-chat" class="tab active">
+      <div class="toolbar">
+        <button onclick="clearChat()">Clear</button>
+        <select id="model-select"><option>deepseek-chat</option><option>deepseek-v4-flash</option></select>
+      </div>
       <div class="messages" id="messages"></div>
       <div class="input-bar">
-        <input type="text" id="prompt" placeholder="Ask something..." onkeydown="if(event.key==='Enter') send()">
+        <input type="text" id="prompt" placeholder="Ask something..." onkeydown="if(event.key==='Enter')send()">
         <button onclick="send()">Send</button>
       </div>
     </div>
     <div id="tab-tools" class="tab"><h2>Tools</h2><div class="tool-list" id="tool-list"></div></div>
     <div id="tab-config" class="tab"><h2>Config</h2><div class="config-info" id="config-info"></div></div>
+    <div id="tab-sessions" class="tab"><h2>Sessions</h2><div id="session-list"></div></div>
   </main>
 </div>
 <script src="/app.js"></script>
