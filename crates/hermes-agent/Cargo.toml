@@ -17,3 +17,4 @@ regex-lite = "0.1"
 shellexpand = "3.1.0"
 uuid.workspace = true
 serde_yaml.workspace = true
+rand = "0.8"

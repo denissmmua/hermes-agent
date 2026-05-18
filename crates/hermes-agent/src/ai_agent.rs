@@ -185,7 +185,7 @@ pub struct ProviderRegistry {
     /// Primary providers by name
     providers: HashMap<String, Arc<dyn LLMProvider>>,
     /// Ordered list of fallback provider names
-    fallback_order: Vec<String>,
+    pub fallback_order: Vec<String>,
 }
 
 impl ProviderRegistry {
