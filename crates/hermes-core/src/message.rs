@@ -74,6 +74,28 @@ impl Message {
         }
     }
 
+    /// Create a tool result message
+    pub fn tool_result_msg(call_id: impl Into<String>, tool_name: impl Into<String>, output: impl Into<String>, success: bool, duration_ms: u64) -> Self {
+        let output_str: String = output.into();
+        let call_id_str: String = call_id.into();
+        let tool_name_str: String = tool_name.into();
+        Self {
+            id: Uuid::new_v4(),
+            role: Role::Tool,
+            content: output_str.clone(),
+            tool_calls: None,
+            tool_result: Some(ToolResultMeta {
+                call_id: call_id_str,
+                tool_name: tool_name_str,
+                output: output_str,
+                success,
+                duration_ms,
+            }),
+            timestamp: Utc::now(),
+            metadata: None,
+        }
+    }
+
     pub fn with_tool_calls(mut self, calls: Vec<ToolCall>) -> Self {
         self.tool_calls = Some(calls);
         self
@@ -156,6 +178,13 @@ mod tests {
             ToolCall { id: "1".into(), name: "x".into(), arguments: json!({}) }
         ]);
         assert!(m.tool_calls.is_some());
+    }
+
+    #[test]
+    fn test_tool_result_msg() {
+        let m = Message::tool_result_msg("call1", "shell", "ok", true, 100);
+        assert!(matches!(m.role, Role::Tool));
+        assert!(m.tool_result.is_some());
     }
 
     #[test]

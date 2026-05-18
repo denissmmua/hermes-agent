@@ -1,6 +1,7 @@
 use std::sync::Arc;
+use std::time::Instant;
 use hermes_core::{
-    AgentConfig, AgentResult, AgentState, Message, Role, ToolInput,
+    AgentConfig, AgentResult, AgentState, Message, Role, ToolDefinition, ToolInput,
 };
 use hermes_gateway::{LLMMessage, LLMProvider, LLMRequest, RetryConfig, with_retry};
 
@@ -20,11 +21,16 @@ impl AgentRuntime {
     pub fn state(&self) -> &AgentState { &self.state }
     pub fn state_mut(&mut self) -> &mut AgentState { &mut self.state }
     pub fn register_tool(&mut self, tool: Arc<dyn hermes_core::Tool>) {
-        self.state.tools.register(tool);
+        self.state_mut().tools.register(tool);
     }
 
-    /// One user turn: may involve multiple LLM calls if tool calls are made
+    /// Full Hermes observe-think-act loop.
+    /// 1. OBSERVE: user input → store as user message
+    /// 2. THINK: send full conversation to LLM
+    /// 3. ACT: if tool_calls → execute each, store results as tool messages, goto 2
+    ///         if text → store as assistant response, done
     pub async fn run_turn(&mut self, user_input: &str) -> AgentResult<String> {
+        // 1. OBSERVE
         self.state.conversation.push(Message::user(user_input));
         self.state.turn += 1;
 
@@ -32,26 +38,26 @@ impl AgentRuntime {
             return Err(hermes_core::AgentError::Unknown("Max turns exceeded".into()));
         }
 
-        // Observe-Think-Act loop
-        let mut final_response = String::new();
-        let mut tool_calls_made = 0;
+        let max_iterations: usize = 15;
+        let mut iteration: usize = 0;
 
         loop {
-            if tool_calls_made > 10 {
-                final_response.push_str("\n[Max tool calls reached]");
+            iteration += 1;
+            if iteration > max_iterations {
+                self.state.conversation.push(Message::assistant("[Max iterations reached]"));
                 break;
             }
 
+            // 2. THINK: send conversation to LLM
             let llm_messages = self.to_llm_messages();
-            let tools = self.state.tools.all_definitions();
+            let tool_defs = self.state.tools.all_definitions();
             let model = self.state.config.model.clone();
             let temperature = self.state.config.temperature;
 
-            // 1. THINK: Ask LLM
             let response = {
                 let gw = &self.gateway;
                 let msgs = llm_messages.clone();
-                let tg = tools.clone();
+                let tdefs = tool_defs.clone();
                 let mdl = model.clone();
                 let temp = temperature;
                 with_retry(&self.retry_config, || async {
@@ -62,65 +68,69 @@ impl AgentRuntime {
                         temperature: Some(temp),
                         stop: None,
                         stream: false,
-                        tools: tg.clone(),
+                        tools: tdefs.clone(),
                     };
                     gw.chat(request).await
                 })
                 .await?
             };
 
-            // Check if there are tool calls
+            // Store assistant response (with tool_calls if any)
+            let mut assistant_msg = Message::assistant(&response.content);
+            if !response.tool_calls.is_empty() {
+                let calls: Vec<hermes_core::ToolCall> = response.tool_calls.iter().map(|(id, name, args)| {
+                    hermes_core::ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: args.clone(),
+                    }
+                }).collect();
+                assistant_msg = assistant_msg.with_tool_calls(calls);
+            }
+            self.state.conversation.push(assistant_msg);
+
+            // 3. ACT: execute tool calls if any
             if response.tool_calls.is_empty() {
-                // 3. ACT: No tool calls — final response
-                if !response.content.is_empty() {
-                    self.state.conversation.push(Message::assistant(&response.content));
-                    final_response = response.content;
-                }
-                break;
+                // No tool calls → this is the final response
+                return Ok(response.content);
             }
 
-            // 2. ACT: Execute tool calls
-            for (_call_id, tool_name, args) in &response.tool_calls {
-                tool_calls_made += 1;
-                let result = match self.state.tools.get(tool_name) {
+            // Execute each tool call and store results
+            for (call_id, tool_name, args) in &response.tool_calls {
+                let start = Instant::now();
+                let (output, success) = match self.state.tools.get(tool_name) {
                     Some(tool) => {
                         let input = ToolInput {
                             tool_name: tool_name.clone(),
                             arguments: args.clone(),
                         };
                         match tool.execute(input).await {
-                            Ok(output) => {
-                                let result = format!("Result: {}", output.output);
-                                self.state.conversation.push(Message::assistant(&result));
-                                result
-                            }
-                            Err(e) => {
-                                let err = format!("Error: {}", e);
-                                self.state.conversation.push(Message::assistant(&err));
-                                err
-                            }
+                            Ok(out) => (out.output, true),
+                            Err(e) => (format!("Error: {}", e), false),
                         }
                     }
-                    None => {
-                        let err = format!("Tool '{}' not found", tool_name);
-                        self.state.conversation.push(Message::assistant(&err));
-                        err
-                    }
+                    None => (format!("Tool '{}' not found", tool_name), false),
                 };
+                let duration_ms = start.elapsed().as_millis() as u64;
 
-                // Feed result back to LLM for next iteration
-                let tool_result_msg = LLMMessage {
-                    role: "tool".to_string(),
-                    content: result.clone(),
-                };
-                // We'll include it in the next loop iteration
-                final_response = result;
+                // Store tool result as a tool-role message
+                self.state.conversation.push(
+                    Message::tool_result_msg(call_id, tool_name, &output, success, duration_ms)
+                );
             }
 
-            // Loop continues: THINK again with tool results in context
+            // Loop continues: tool results are now in conversation
+            // LLM will see them on next iteration
         }
 
-        Ok(final_response)
+        // Get the last assistant message as final response
+        let last = self.state.conversation.messages.iter()
+            .filter(|m| matches!(m.role, Role::Assistant))
+            .last()
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+
+        Ok(last)
     }
 
     fn to_llm_messages(&self) -> Vec<LLMMessage> {
@@ -131,9 +141,25 @@ impl AgentRuntime {
                 Role::Assistant => "assistant",
                 Role::Tool => "tool",
             };
+            let tool_call_id = m.tool_result.as_ref().map(|r| r.call_id.clone());
+            let tool_calls = m.tool_calls.as_ref().map(|calls| {
+                calls.iter().map(|tc| {
+                    let args_str = serde_json::to_string(&tc.arguments).unwrap_or_default();
+                    hermes_gateway::LLMToolCall {
+                        id: tc.id.clone(),
+                        type_: "function".to_string(),
+                        function: hermes_gateway::LLMToolCallFunction {
+                            name: tc.name.clone(),
+                            arguments: args_str,
+                        },
+                    }
+                }).collect()
+            });
             LLMMessage {
                 role: role.to_string(),
                 content: m.content.clone(),
+                tool_call_id,
+                tool_calls,
             }
         }).collect()
     }

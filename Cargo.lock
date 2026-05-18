@@ -672,6 +672,8 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_yaml",
+ "shellexpand",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -51,23 +51,73 @@ fn base_url() -> String {
         .unwrap_or_else(|_| "https://api.deepseek.com".to_string())
 }
 
+fn load_gateway_config() -> GatewayConfig {
+    // Try config file first
+    let config_path = shellexpand::tilde("~/.hermes/config.yaml");
+    if let Ok(content) = std::fs::read_to_string(config_path.as_ref()) {
+        if let Ok(cfg) = serde_yaml::from_str::<HermesConfig>(&content) {
+            // Check custom_providers for DeepSeek
+            for cp in &cfg.custom_providers {
+                if !cp.api_key.is_empty() {
+                    return GatewayConfig {
+                        model: cp.model.clone(),
+                        api_key: cp.api_key.clone(),
+                        base_url: Some(cp.base_url.clone()),
+                        ..Default::default()
+                    };
+                }
+            }
+            // Fall back to model section
+            if let Some(ak) = &cfg.model.api_key {
+                if !ak.is_empty() {
+                    let base = match cfg.model.base_url.as_ref() {
+                        Some(u) if !u.is_empty() => Some(u.clone()),
+                        _ => Some("https://api.deepseek.com".to_string()),
+                    };
+                    return GatewayConfig {
+                        model: if cfg.model.default == "gpt-5.5" { "deepseek-chat".to_string() } else { cfg.model.default.clone() },
+                        api_key: ak.clone(),
+                        base_url: base,
+                        ..Default::default()
+                    };
+                }
+            }
+        }
+    }
+    // Fall back to env vars
+    GatewayConfig {
+        model: "deepseek-chat".to_string(),
+        api_key: api_key(),
+        base_url: Some(base_url()),
+        ..Default::default()
+    }
+}
+
 fn build_runtime(model: &str) -> anyhow::Result<AgentRuntime> {
     let mut tools = ToolRegistry::new();
-    let tool_list: Vec<Arc<dyn hermes_core::Tool>> = vec![Arc::new(ShellTool), Arc::new(ReadFileTool), Arc::new(WriteFileTool),
-              Arc::new(GrepTool), Arc::new(GitTool), Arc::new(WebFetchTool)];
-    for t in tool_list {
-        tools.register(t);
+    let tool_list: Vec<Arc<dyn hermes_core::Tool>> = vec![
+        Arc::new(ShellTool), Arc::new(ReadFileTool), Arc::new(WriteFileTool),
+        Arc::new(GrepTool), Arc::new(GitTool), Arc::new(WebFetchTool),
+    ];
+    for t in tool_list { tools.register(t); }
+
+    let mut gw_cfg = load_gateway_config();
+    if !model.is_empty() && model != "deepseek-chat" {
+        gw_cfg.model = model.to_string();
     }
-    let gw = Arc::new(OpenAIProvider::new(GatewayConfig {
-        model: model.to_string(), api_key: api_key(),
-        base_url: Some(base_url()), ..Default::default()
-    }));
+    // If still no model, set default
+    if gw_cfg.model.is_empty() { gw_cfg.model = "deepseek-chat".to_string(); }
+
+    let gw = Arc::new(OpenAIProvider::new(gw_cfg));
     let mut rt = AgentRuntime::new(AgentConfig {
-        name: "hermes".to_string(), model: model.to_string(),
-        system_prompt: "You are Hermes, an AI coding agent in Rust.".to_string(),
+        name: "hermes".to_string(),
+        model: model.to_string(),
+        system_prompt: "You are Hermes, an AI coding agent in Rust. You have access to tools. Use them to complete tasks.".to_string(),
         ..Default::default()
     }, gw);
-    for n in tools.names() { if let Some(t) = tools.get(&n) { rt.register_tool(t); } }
+    for n in tools.names() {
+        if let Some(t) = tools.get(&n) { rt.register_tool(t); }
+    }
     Ok(rt)
 }
 

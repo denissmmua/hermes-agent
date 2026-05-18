@@ -1,37 +1,125 @@
-use std::collections::HashMap;
-use std::path::Path;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
 
+use crate::error::AgentResult;
+
+/// Plugin capability: what the plugin can do
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PluginCapability {
+    /// Hook into message processing
+    MessageHook,
+    /// Hook into tool execution
+    ToolHook,
+    /// Provide custom tools
+    ToolProvider,
+    /// Provide custom skills
+    SkillProvider,
+    /// Handle events
+    EventHandler,
+    /// Custom
+    Custom(String),
+}
+
+/// Metadata describing a plugin
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginMeta {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub author: Option<String>,
+    pub capabilities: Vec<PluginCapability>,
+    pub dependencies: Vec<String>,
+    pub config_schema: Option<serde_json::Value>,
+}
+
+/// Context passed to plugin hooks
+#[derive(Debug, Clone)]
+pub struct PluginContext {
+    pub agent_name: String,
+    pub config: serde_json::Value,
+    pub state: Option<serde_json::Value>,
+}
+
+/// Result from a plugin hook
+#[derive(Debug, Clone)]
+pub struct PluginResult {
+    pub modified: bool,
+    pub data: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+impl PluginResult {
+    pub fn passthrough() -> Self {
+        Self { modified: false, data: None, error: None }
+    }
+
+    pub fn modified(data: serde_json::Value) -> Self {
+        Self { modified: true, data: Some(data), error: None }
+    }
+}
+
+/// Core trait for all plugins
 #[async_trait]
 pub trait Plugin: Send + Sync {
-    fn name(&self) -> &str;
-    fn version(&self) -> &str;
-    fn description(&self) -> &str;
-    async fn on_load(&self) -> Result<(), String>;
-    async fn on_unload(&self) -> Result<(), String>;
+    fn meta(&self) -> &PluginMeta;
+
+    /// Initialize the plugin with configuration
+    async fn init(&self, ctx: &PluginContext) -> AgentResult<()> {
+        let _ = ctx;
+        Ok(())
+    }
+
+    /// Hook called before a message is sent to the LLM
+    async fn pre_process_message(&self, _ctx: &PluginContext, _message: &mut crate::Message) -> AgentResult<PluginResult> {
+        Ok(PluginResult::passthrough())
+    }
+
+    /// Hook called after LLM response
+    async fn post_process_response(&self, _ctx: &PluginContext, _response: &mut serde_json::Value) -> AgentResult<PluginResult> {
+        Ok(PluginResult::passthrough())
+    }
+
+    /// Hook called before tool execution
+    async fn pre_tool_execute(&self, _ctx: &PluginContext, _tool_name: &str, _args: &mut serde_json::Value) -> AgentResult<PluginResult> {
+        Ok(PluginResult::passthrough())
+    }
+
+    /// Hook called after tool execution
+    async fn post_tool_execute(&self, _ctx: &PluginContext, _tool_name: &str, _output: &mut crate::ToolOutput) -> AgentResult<PluginResult> {
+        Ok(PluginResult::passthrough())
+    }
+
+    /// Shutdown hook
+    async fn shutdown(&self) -> AgentResult<()> {
+        Ok(())
+    }
 }
 
-pub struct PluginManager {
-    plugins: HashMap<String, Box<dyn Plugin>>,
-    search_paths: Vec<String>,
+pub type PluginBox = Arc<dyn Plugin>;
+
+/// Registry for managing plugins
+pub struct PluginRegistry {
+    plugins: HashMap<String, PluginBox>,
+    configs: HashMap<String, serde_json::Value>,
 }
 
-impl PluginManager {
+impl PluginRegistry {
     pub fn new() -> Self {
-        Self { plugins: HashMap::new(), search_paths: Vec::new() }
+        Self { plugins: HashMap::new(), configs: HashMap::new() }
     }
 
-    pub fn add_search_path(&mut self, path: impl Into<String>) {
-        self.search_paths.push(path.into());
+    pub fn register(&mut self, plugin: PluginBox, config: Option<serde_json::Value>) {
+        let name = plugin.meta().name.clone();
+        self.plugins.insert(name.clone(), plugin);
+        if let Some(cfg) = config {
+            self.configs.insert(name, cfg);
+        }
     }
 
-    pub fn register(&mut self, plugin: Box<dyn Plugin>) {
-        let n = plugin.name().to_string();
-        self.plugins.insert(n, plugin);
-    }
-
-    pub fn get(&self, name: &str) -> Option<&Box<dyn Plugin>> {
-        self.plugins.get(name)
+    pub fn get(&self, name: &str) -> Option<PluginBox> {
+        self.plugins.get(name).cloned()
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -41,55 +129,34 @@ impl PluginManager {
     pub fn is_empty(&self) -> bool { self.plugins.is_empty() }
     pub fn len(&self) -> usize { self.plugins.len() }
 
-    pub async fn load_builtins(&mut self) {
-        self.register(Box::new(VersionPlugin));
-        self.register(Box::new(HelpPlugin));
+    pub fn get_config(&self, name: &str) -> Option<serde_json::Value> {
+        self.configs.get(name).cloned()
     }
 
-    pub async fn scan_paths(&mut self) {
-        let paths = self.search_paths.clone();
-        let mut found: Vec<Box<dyn Plugin>> = Vec::new();
-        for ps in &paths {
-            let p = Path::new(ps);
-            if !p.exists() { continue; }
-            let dir = match std::fs::read_dir(p) { Ok(d) => d, Err(_) => continue };
-            for e in dir.flatten() {
-                let f = e.file_name().to_string_lossy().to_string();
-                if !f.ends_with(".rs") && !f.ends_with(".sh") && !f.ends_with(".py") { continue; }
-                let n = f.trim_end_matches(".rs").trim_end_matches(".sh").trim_end_matches(".py").to_string();
-                found.push(Box::new(ScriptPlugin { name: n, path: e.path().to_string_lossy().to_string() }));
-            }
+    /// Initialize all registered plugins
+    pub async fn init_all(&self, agent_name: &str) -> AgentResult<()> {
+        for (name, plugin) in &self.plugins {
+            let ctx = PluginContext {
+                agent_name: agent_name.to_string(),
+                config: self.configs.get(name).cloned().unwrap_or(serde_json::Value::Null),
+                state: None,
+            };
+            plugin.init(&ctx).await?;
         }
-        for p in found { self.register(p); }
+        Ok(())
+    }
+
+    /// Shutdown all plugins
+    pub async fn shutdown_all(&self) -> AgentResult<()> {
+        for plugin in self.plugins.values() {
+            plugin.shutdown().await?;
+        }
+        Ok(())
     }
 }
 
-struct VersionPlugin;
-#[async_trait]
-impl Plugin for VersionPlugin {
-    fn name(&self) -> &str { "version" }
-    fn version(&self) -> &str { "1.0.0" }
-    fn description(&self) -> &str { "Version information" }
-    async fn on_load(&self) -> Result<(), String> { Ok(()) }
-    async fn on_unload(&self) -> Result<(), String> { Ok(()) }
-}
-
-struct HelpPlugin;
-#[async_trait]
-impl Plugin for HelpPlugin {
-    fn name(&self) -> &str { "help" }
-    fn version(&self) -> &str { "1.0.0" }
-    fn description(&self) -> &str { "Help system" }
-    async fn on_load(&self) -> Result<(), String> { Ok(()) }
-    async fn on_unload(&self) -> Result<(), String> { Ok(()) }
-}
-
-struct ScriptPlugin { name: String, path: String }
-#[async_trait]
-impl Plugin for ScriptPlugin {
-    fn name(&self) -> &str { &self.name }
-    fn version(&self) -> &str { "0.1.0" }
-    fn description(&self) -> &str { "Script plugin" }
-    async fn on_load(&self) -> Result<(), String> { Ok(()) }
-    async fn on_unload(&self) -> Result<(), String> { Ok(()) }
+impl Default for PluginRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }

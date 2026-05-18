@@ -1,71 +1,185 @@
-use async_trait::async_trait;
-use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::broadcast;
+use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
 
-#[derive(Debug, Clone)]
-pub enum NotificationLevel { Info, Warning, Error, Success }
+/// Notification severity levels
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NotificationLevel {
+    Info,
+    Warning,
+    Error,
+    Critical,
+}
 
+/// A notification event from any subsystem
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Notification {
+    pub id: String,
+    pub timestamp: DateTime<Utc>,
     pub level: NotificationLevel,
+    pub source: String,
     pub title: String,
     pub message: String,
-    pub source: String,
+    pub metadata: Option<serde_json::Value>,
 }
 
-#[async_trait]
-pub trait Notifier: Send + Sync {
-    fn name(&self) -> &str;
-    async fn send(&self, notification: &Notification) -> Result<(), String>;
-    fn is_enabled(&self) -> bool;
-    fn enable(&mut self);
-    fn disable(&mut self);
-}
-
-pub struct NotifierManager {
-    notifiers: HashMap<String, Box<dyn Notifier>>,
-    enabled: bool,
-}
-
-impl NotifierManager {
-    pub fn new() -> Self { Self { notifiers: HashMap::new(), enabled: true } }
-
-    pub fn register(&mut self, notifier: Box<dyn Notifier>) {
-        let name = notifier.name().to_string();
-        self.notifiers.insert(name, notifier);
-    }
-
-    pub async fn notify(&self, notification: &Notification) {
-        if !self.enabled { return; }
-        for (_, n) in &self.notifiers {
-            if n.is_enabled() {
-                let _ = n.send(notification).await;
-            }
+impl Notification {
+    pub fn new(
+        level: NotificationLevel,
+        source: impl Into<String>,
+        title: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now(),
+            level,
+            source: source.into(),
+            title: title.into(),
+            message: message.into(),
+            metadata: None,
         }
     }
 
-    pub fn enable(&mut self) { self.enabled = true; }
-    pub fn disable(&mut self) { self.enabled = false; }
-}
-
-pub struct ConsoleNotifier { enabled: bool }
-
-impl ConsoleNotifier {
-    pub fn new() -> Self { Self { enabled: true } }
-}
-
-#[async_trait]
-impl Notifier for ConsoleNotifier {
-    fn name(&self) -> &str { "console" }
-    async fn send(&self, n: &Notification) -> Result<(), String> {
-        let level = match n.level {
-            NotificationLevel::Info => "INFO",
-            NotificationLevel::Warning => "WARN",
-            NotificationLevel::Error => "ERROR",
-            NotificationLevel::Success => "OK",
-        };
-        println!("[{}] [{}] {}: {}", level, n.source, n.title, n.message);
-        Ok(())
+    pub fn with_metadata(mut self, meta: serde_json::Value) -> Self {
+        self.metadata = Some(meta);
+        self
     }
-    fn is_enabled(&self) -> bool { self.enabled }
-    fn enable(&mut self) { self.enabled = true; }
-    fn disable(&mut self) { self.enabled = false; }
+
+    pub fn info(source: impl Into<String>, title: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(NotificationLevel::Info, source, title, message)
+    }
+
+    pub fn warning(source: impl Into<String>, title: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(NotificationLevel::Warning, source, title, message)
+    }
+
+    pub fn error(source: impl Into<String>, title: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(NotificationLevel::Error, source, title, message)
+    }
+
+    pub fn critical(source: impl Into<String>, title: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(NotificationLevel::Critical, source, title, message)
+    }
+}
+
+/// Event emitted by the notifier
+#[derive(Debug, Clone)]
+pub enum NotifierEvent {
+    Notification(Notification),
+    Shutdown,
+}
+
+/// Thread-safe notification bus
+#[derive(Clone)]
+pub struct Notifier {
+    tx: broadcast::Sender<NotifierEvent>,
+}
+
+impl Notifier {
+    /// Create a new notifier with a bounded channel capacity
+    pub fn new(capacity: usize) -> Self {
+        let (tx, _) = broadcast::channel(capacity);
+        Self { tx }
+    }
+
+    /// Publish a notification to all subscribers
+    pub fn notify(&self, notification: Notification) {
+        let _ = self.tx.send(NotifierEvent::Notification(notification));
+    }
+
+    /// Subscribe to all notifications
+    pub fn subscribe(&self) -> broadcast::Receiver<NotifierEvent> {
+        self.tx.subscribe()
+    }
+
+    /// Number of active subscribers
+    pub fn subscriber_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
+}
+
+impl Default for Notifier {
+    fn default() -> Self {
+        Self::new(256)
+    }
+}
+
+/// A trait for components that can receive notifications
+#[async_trait::async_trait]
+pub trait NotificationHandler: Send + Sync {
+    async fn handle(&self, notification: &Notification);
+}
+
+/// A registry of notification handlers
+pub struct NotificationRegistry {
+    handlers: Vec<Arc<dyn NotificationHandler>>,
+}
+
+impl NotificationRegistry {
+    pub fn new() -> Self {
+        Self { handlers: Vec::new() }
+    }
+
+    pub fn register(&mut self, handler: Arc<dyn NotificationHandler>) {
+        self.handlers.push(handler);
+    }
+
+    pub async fn dispatch(&self, notification: &Notification) {
+        for handler in &self.handlers {
+            handler.handle(notification).await;
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.handlers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.handlers.is_empty()
+    }
+}
+
+impl Default for NotificationRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_notification_creation() {
+        let n = Notification::info("test", "Title", "Message");
+        assert_eq!(n.level, NotificationLevel::Info);
+        assert_eq!(n.source, "test");
+        assert_eq!(n.title, "Title");
+        assert_eq!(n.message, "Message");
+    }
+
+    #[test]
+    fn test_notifier_pub_sub() {
+        let notifier = Notifier::new(16);
+        let mut rx = notifier.subscribe();
+
+        let n = Notification::warning("test", "Warn", "Something");
+        notifier.notify(n.clone());
+
+        // Should receive the notification
+        match rx.try_recv() {
+            Ok(NotifierEvent::Notification(received)) => {
+                assert_eq!(received.title, "Warn");
+            }
+            _ => panic!("Expected notification"),
+        }
+    }
+
+    #[test]
+    fn test_notification_level_order() {
+        assert!(NotificationLevel::Info != NotificationLevel::Error);
+        assert_eq!(NotificationLevel::Critical, NotificationLevel::Critical);
+    }
 }

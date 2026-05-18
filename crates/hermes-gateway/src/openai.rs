@@ -39,7 +39,26 @@ impl LLMProvider for OpenAIProvider {
         let mut body = serde_json::json!({
             "model": request.model,
             "messages": request.messages.iter().map(|m| {
-                serde_json::json!({"role": m.role, "content": m.content})
+                let mut msg = serde_json::json!({"role": m.role, "content": m.content});
+                if let Some(tcid) = &m.tool_call_id {
+                    msg["tool_call_id"] = serde_json::Value::String(tcid.clone());
+                }
+                if m.role == "assistant" {
+                    if let Some(tcs) = &m.tool_calls {
+                        let calls: Vec<serde_json::Value> = tcs.iter().map(|tc| {
+                            serde_json::json!({
+                                "id": tc.id,
+                                "type": tc.type_,
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                }
+                            })
+                        }).collect();
+                        msg["tool_calls"] = serde_json::Value::Array(calls);
+                    }
+                }
+                msg
             }).collect::<Vec<serde_json::Value>>(),
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
