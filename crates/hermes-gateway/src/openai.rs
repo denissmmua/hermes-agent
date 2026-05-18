@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use hermes_core::{AgentError, AgentResult, GatewayConfig};
 use reqwest::Client;
 
-use crate::provider::{LLMMessage, LLMProvider, LLMRequest, LLMResponse, TokenUsage};
+use crate::provider::{LLMProvider, LLMRequest, LLMResponse, TokenUsage};
 
 #[derive(Clone)]
 pub struct OpenAIProvider {

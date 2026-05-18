@@ -7,6 +7,10 @@ members = [
     "crates/hermes-gateway",
     "crates/hermes-tools",
     "crates/hermes-state",
+    "crates/hermes-checkpoints",
+    "crates/hermes-mcp",
+    "crates/hermes-cron",
+    "crates/hermes-memory",
 ]
 
 [workspace.package]
@@ -24,6 +28,6 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
