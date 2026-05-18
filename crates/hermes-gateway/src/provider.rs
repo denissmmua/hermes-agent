@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use hermes_core::{AgentResult, Conversation, GatewayConfig};
+use hermes_core::{AgentResult, GatewayConfig, ToolDefinition};
 
 #[derive(Debug, Clone)]
 pub struct LLMRequest {
@@ -9,6 +9,7 @@ pub struct LLMRequest {
     pub temperature: Option<f64>,
     pub stop: Option<Vec<String>>,
     pub stream: bool,
+    pub tools: Vec<ToolDefinition>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -22,6 +23,7 @@ pub struct LLMResponse {
     pub content: String,
     pub model: String,
     pub usage: Option<TokenUsage>,
+    pub tool_calls: Vec<(String, String, serde_json::Value)>, // id, name, arguments
 }
 
 #[derive(Debug, Clone)]

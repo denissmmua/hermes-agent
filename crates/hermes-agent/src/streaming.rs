@@ -33,6 +33,7 @@ pub async fn stream_turn(
             temperature: Some(temperature),
             stop: None,
             stream: true,
+            tools: Vec::new(),
         };
         let callback_tx = tx.clone();
         match gateway.chat_stream(request, Box::new(move |delta| {

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use hermes_core::{AgentError, AgentResult, GatewayConfig};
+use hermes_core::{AgentError, AgentResult, GatewayConfig, ToolDefinition};
 use reqwest::Client;
 
 use crate::provider::{LLMProvider, LLMRequest, LLMResponse, TokenUsage};
@@ -36,7 +36,7 @@ impl LLMProvider for OpenAIProvider {
     async fn chat(&self, request: LLMRequest) -> AgentResult<LLMResponse> {
         let url = format!("{}/chat/completions", self.api_url());
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": request.model,
             "messages": request.messages.iter().map(|m| {
                 serde_json::json!({"role": m.role, "content": m.content})
@@ -45,6 +45,23 @@ impl LLMProvider for OpenAIProvider {
             "temperature": request.temperature,
             "stream": false,
         });
+
+        // Add native function calling tools
+        let tools_json: Vec<serde_json::Value> = request.tools.iter().map(|t| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                }
+            })
+        }).collect();
+
+        if !tools_json.is_empty() {
+            body["tools"] = serde_json::Value::Array(tools_json);
+            body["tool_choice"] = serde_json::Value::String("auto".to_string());
+        }
 
         let response = self
             .client
@@ -62,10 +79,7 @@ impl LLMProvider for OpenAIProvider {
             if status.as_u16() == 429 {
                 return Err(AgentError::RateLimited(10));
             }
-            return Err(AgentError::Provider(format!(
-                "API error {}: {}",
-                status, text
-            )));
+            return Err(AgentError::Provider(format!("API error {}: {}", status, text)));
         }
 
         let json: serde_json::Value = response
@@ -73,10 +87,20 @@ impl LLMProvider for OpenAIProvider {
             .await
             .map_err(|e| AgentError::Provider(format!("Parse error: {}", e)))?;
 
-        let content = json["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let message = &json["choices"][0]["message"];
+        let content = message["content"].as_str().unwrap_or("").to_string();
+
+        // Extract native function calls
+        let mut tool_calls = Vec::new();
+        if let Some(calls) = message["tool_calls"].as_array() {
+            for tc in calls {
+                let id = tc["id"].as_str().unwrap_or("").to_string();
+                let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+                let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
+                let args: serde_json::Value = serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null);
+                tool_calls.push((id, name, args));
+            }
+        }
 
         let usage = json["usage"].as_object().map(|u| TokenUsage {
             prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
@@ -88,6 +112,7 @@ impl LLMProvider for OpenAIProvider {
             content,
             model: request.model,
             usage,
+            tool_calls,
         })
     }
 
