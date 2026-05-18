@@ -18,3 +18,4 @@ shellexpand = "3.1.0"
 uuid.workspace = true
 serde_yaml.workspace = true
 rand = "0.8"
+reqwest.workspace = true
