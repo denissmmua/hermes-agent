@@ -12,6 +12,7 @@ members = [
     "crates/hermes-cron",
     "crates/hermes-memory",
     "crates/hermes-gateway-server",
+    "crates/hermes-web",
 ]
 
 [workspace.package]

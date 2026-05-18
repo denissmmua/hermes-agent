@@ -1,5 +1,4 @@
 use hermes_core::{Conversation, Message};
-use std::collections::VecDeque;
 
 /// Manages context window within token limits
 pub struct ContextManager {
