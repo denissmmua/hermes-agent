@@ -621,9 +621,11 @@ name = "hermes-gateway-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "hermes-agent",
  "hermes-core",
  "hermes-gateway",
+ "hermes-tools",
  "serde",
  "serde_json",
  "tokio",
