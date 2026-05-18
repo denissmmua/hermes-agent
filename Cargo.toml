@@ -11,6 +11,7 @@ members = [
     "crates/hermes-mcp",
     "crates/hermes-cron",
     "crates/hermes-memory",
+    "crates/hermes-gateway-server",
 ]
 
 [workspace.package]
@@ -20,14 +21,15 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 async-trait = "0.1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "process", "fs", "io-util", "sync", "time", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 anyhow = "1"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

@@ -12,3 +12,4 @@ async-trait.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+serde_yaml = "0.9"

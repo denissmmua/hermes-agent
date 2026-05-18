@@ -131,7 +131,7 @@ impl AgentRuntime {
             if pos >= len {
                 break;
             }
-            let tag_start = pos;
+            let _tag_start = pos;
             pos += 1; // skip <
 
             // Find tag name (until >)
