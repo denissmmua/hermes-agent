@@ -1,4 +1,4 @@
-use hermes_core::{Conversation, Message};
+use hermes_core::Conversation;
 
 /// Manages context window within token limits
 pub struct ContextManager {
